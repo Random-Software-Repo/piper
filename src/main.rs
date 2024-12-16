@@ -60,6 +60,8 @@ fn usage()
 	printwrap::print_wrap(5,8,"  - Piper does not care where these snapshots came from, but if the last snapshot used for replication is destroyed, further replication attempts will fail as incremential replication is always between a current snapshot the previous snapshot used. If that snapshot doesn't exist, it can't be used as a base for further replication.");
 	printwrap::print_wrap(5,8,"  - Piper does not destroy snapshots on the source, either, but the \"-F\" option on zfs receive does have the side effect/benefit of purging snapshots on the destination that no-longer exist on the source.");
 	printwrap::print_wrap(5,8,"");
+	printwrap::print_wrap(5,0,"All piper logging is to stdout.");
+	printwrap::print_wrap(5,0,"");
 	printwrap::print_wrap(5,0,"Piper is intended to be run via cron. When running from cron, the frequency piper is run should correspond to the most frequent snapshots for each dataset to be replicated. Run piper a few minutes after the snapshots are scheduled. If you make daily snapshots there is no need to run piper more frequently. It won't hurt, but isn't necessary. A typical cron line for daily replication might look like this:");
 	printwrap::print_wrap(5,0,"    5  0  *  *  *    /usr/local/bin/piper  >> /var/log/piper.log 2>&1");
 	printwrap::print_wrap(5,8,"or, for hourly replication:");
