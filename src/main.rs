@@ -23,9 +23,16 @@ struct Piper
 fn load_config(file_path: &Path) -> Piper
 {
 	debug!("Json_file_path: \"{}\"", file_path.display());
-
-	let file = File::open(file_path).expect("file not found");
-	let piper=serde_json::from_reader(file).expect("error while reading");
+	let file = match File::open(file_path) 
+	{
+		Err(error) => {error!("Could not open file \"{}\"\n{}", file_path.display(),error);process::exit(1)},
+		Ok(file) => file,
+	};
+	let piper= match serde_json::from_reader(file)
+	{
+		Err(error) => {error!("Error reading file \"{}\"\n{}",file_path.display(), error);process::exit(3)},
+		Ok(piper) => piper,
+	};
 	return piper;
 }
 
