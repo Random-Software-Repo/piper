@@ -1,7 +1,6 @@
 extern crate printwrap;
 use tokio::{process::Command};
 use tokio::io::{BufReader,AsyncBufReadExt};
-//use tokio::process::Command;
 use serde::{Deserialize, Serialize};
 use log::*;
 use std::{process,env,fs::File,path::Path, process::Stdio,str};
@@ -96,16 +95,24 @@ fn can_login_to_host(host:&str) -> bool
 	let mut can_login = std::process::Command::new("ssh");
 			can_login.arg(host);
 			can_login.arg("exit");
-	let can_login_out= can_login.stderr(Stdio::piped())
+	let can_login_out= match can_login.stderr(Stdio::piped())
 			.output()
-			.unwrap();
-	let stderr = String::from_utf8(can_login_out.stderr).unwrap();
-	//info!("can_login status: {}", can_login.status().unwrap());
-	if can_login.status().unwrap().success()
+			{
+				Err(e)=>{error!("Error getting error output from can_login:{}",e);return can_login_status},
+				Ok(can_login_out)=>can_login_out
+			};
+	let stderr = match String::from_utf8(can_login_out.stderr)
+			{
+				Err(e)=>{error!("Error converting can_login_out to utf8:{}",e);return can_login_status},
+				Ok(stderr)=>stderr
+			};
+
+	match can_login.status()
 	{
-		can_login_status=true;
+		Err(_e)=> can_login_status=false,
+		Ok(o)=> can_login_status=o.success()
 	}
-	else
+	if !can_login_status
 	{
 		let lines = stderr.lines();
 		for line in lines
@@ -117,12 +124,13 @@ fn can_login_to_host(host:&str) -> bool
 	return can_login_status;
 }
 
+//is_dataset_encrypted needs to return a Result<T> as bool isn't sufficient (i.e. results need to be true,false,error)
 fn is_dataset_encrypted(dataset:&str) -> bool
 {
 	info!("is dataset encrypted {}", dataset);
 	let full_command = format!("zfs list -H -t filesystem -o encryption  {}",dataset);
 	debug!("{}",full_command);
-	let snapshot_list = std::process::Command::new("zfs")
+	let fs_list = match std::process::Command::new("zfs")
 			.arg("list")
 			.arg("-H")
 			.arg("-t")
@@ -132,10 +140,21 @@ fn is_dataset_encrypted(dataset:&str) -> bool
 			.arg(dataset)
 			.stdout(Stdio::piped())
 			.output()
-			.unwrap();
-	let stdout = String::from_utf8(snapshot_list.stdout).unwrap();
+			{
+				Err(e)=>{error!("Error on \"{}\":{}",full_command,e);return false},// this isn't good enough
+				Ok(fs_list)=>fs_list,
+			};
+	let stdout = match String::from_utf8(fs_list.stdout)
+				{
+					Err(e)=> {error!("error converting fs_list output to utf8: {}",e);return false},
+					Ok(stdout)=>stdout,
+				};
 	let mut lines = stdout.lines();
-	let line = String::from(lines.next().unwrap());
+	let line = String::from(match lines.next()
+								{
+									Some(text)=> text,
+									None=>"",
+								});
 	let is_encrypted = if line == "off" { false} else {true};
 
 	return is_encrypted;
@@ -143,6 +162,7 @@ fn is_dataset_encrypted(dataset:&str) -> bool
 
 fn get_child_datasets(dataset:&str) -> String
 {
+	let error_value=String::from("");
 	info!("get child datasets \"{}\"", dataset);
 	debug!("zfs list -H -d 2 -t filesystem -o name {}",dataset);
 	let mut snapshot_list = std::process::Command::new("zfs");
@@ -155,19 +175,36 @@ fn get_child_datasets(dataset:&str) -> String
 			snapshot_list.arg("-o");
 			snapshot_list.arg("name");
 			snapshot_list.arg(dataset);
-	let snapshot_output=snapshot_list.stdout(Stdio::piped())
+	let snapshot_output= match snapshot_list.stdout(Stdio::piped())
 			.output()
-			.unwrap();
-	let stdout = String::from_utf8(snapshot_output.stdout).unwrap();
-
+			{
+				Err(e)=>{error!("Error getting child datasets output:{}",e);return error_value },
+				Ok(snapshot_output)=>snapshot_output,
+			};
+	let stdout = match String::from_utf8(snapshot_output.stdout)
+			{
+				Err(e)=>{error!("Error converting child datasets output to uft8:{}",e);return error_value },
+				Ok(stdout)=>stdout,
+			};
 	return stdout
 }
 
+fn rsplit_once(source:&str, split_on:char) -> String
+{
+	let (_,value) = match source.rsplit_once(split_on)
+					{
+						None=> ("",""),
+						Some(value)=> value,
+					};
+	String::from(value)
+}
+
+// probably need Result<T> here as well: true,false,error
 fn does_dataset_exist_on_target(sourcedataset:&str, targetdataset:&str, host:&str) -> bool
 {
 	let mut dataset_exists=false;
 	info!("does source dataset ({}) exist in \"{}\" on \"{}\"", sourcedataset, targetdataset, host);
-	let (_, datasetname) = sourcedataset.rsplit_once('/').unwrap();
+	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
 	debug!("{}zfs list -H -t filesystem -o name -S createtxg {}",ssh,targetdatasetname);
@@ -186,17 +223,22 @@ fn does_dataset_exist_on_target(sourcedataset:&str, targetdataset:&str, host:&st
 			dataset_list.arg("-S");
 			dataset_list.arg("createtxg");
 			dataset_list.arg(targetdatasetname);
-	let dataset_list_out= dataset_list.stdout(Stdio::piped())
+	let dataset_list_out= match dataset_list.stdout(Stdio::piped())
 			.output()
-			.unwrap();
-	info!("dataset_list_out status: {}", dataset_list.status().unwrap());
+			{
+				Err(e)=> {error!("Error getting dataset_list_out:{}",e);return false},
+				Ok(dataset_list_out)=>dataset_list_out,
+			};
+	info!("dataset_list_out status: \"{}\"", match dataset_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
 	if dataset_list_out.status.success()
 	{
+		// maybe should be info! rather than debug!
 		debug!("Dataset exists on target.");
 		dataset_exists = true;
 	}
 	else
 	{
+		// maybe should be info! rather than debug!
 		debug!("Dataset does not exist on target.");
 	}
 	return dataset_exists;
@@ -205,8 +247,9 @@ fn does_dataset_exist_on_target(sourcedataset:&str, targetdataset:&str, host:&st
 
 fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&str) -> String
 {
+	let error_value = String::from("");
 	info!("get last replicated snapshot named \"{}\" in \"{}\" on \"{}\"", sourcedataset, targetdataset, host);
-	let (_, datasetname) = sourcedataset.rsplit_once('/').unwrap();
+	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
 	debug!("{}zfs list -H -t snapshot -o name -S createtxg {}",ssh,targetdatasetname);
@@ -225,11 +268,18 @@ fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&st
 			snapshot_list.arg("-S");
 			snapshot_list.arg("createtxg");
 			snapshot_list.arg(targetdatasetname);
-	let snapshot_out= snapshot_list.stdout(Stdio::piped())
+	let snapshot_out= match snapshot_list.stdout(Stdio::piped())
 			.output()
-			.unwrap();
-	let stdout = String::from_utf8(snapshot_out.stdout).unwrap();
-	info!("snapshot_out status: {}", snapshot_list.status().unwrap());
+			{
+				Err(e)=> {error!("Error getting snapshot_list stdout {}",e);return error_value},
+				Ok(snapshot_out)=>snapshot_out,
+			};
+	let stdout = match String::from_utf8(snapshot_out.stdout)
+						{
+							Err(e)=>{error!("Error converting output to UTF8:{}",e);error_value},
+							Ok(stdout)=>stdout
+						};
+	info!("snapshot_out status: \"{}\"", match snapshot_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
 	if snapshot_out.status.success()
 	{
 		let line = stdout.lines().next();
@@ -238,7 +288,12 @@ fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&st
 			info!("No last replicated snapshot");
 			return String::from("")
 		}
-		let (_, name) = line.unwrap().rsplit_once('@').unwrap();
+		let uline = match line
+						{
+							None=>"",
+							Some(ul)=>ul,
+						};
+		let name = rsplit_once(uline, '@');
 		info!("Last replicated snapshot:\"{}\"", name);
 		return String::from(name);
 	}
@@ -251,9 +306,10 @@ fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&st
 
 fn get_most_recent_snapshot(dataset:&str, host:&str) -> String
 {
+	let error=String::from("//!!--XX--ERROR--XX--!!\\\\"); 
 	info!("get most recent snapshot named \"{}\" on \"{}\"", dataset, host);
 	debug!("zfs list -H -t snapshot -o name -S createtxg {}",dataset);
-//	let snapshot_list = std::process::Command::new("zfs")
+
 	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
 			{
@@ -261,7 +317,6 @@ fn get_most_recent_snapshot(dataset:&str, host:&str) -> String
 				snapshot_list.arg("zfs");
 			}
 			snapshot_list.arg("list");
-//			.arg("list")
 			snapshot_list.arg("-H");
 			snapshot_list.arg("-t");
 			snapshot_list.arg("snapshot");
@@ -270,13 +325,25 @@ fn get_most_recent_snapshot(dataset:&str, host:&str) -> String
 			snapshot_list.arg("-S");
 			snapshot_list.arg("createtxg");
 			snapshot_list.arg(dataset);
-	let snapshot_out = snapshot_list.stdout(Stdio::piped())
+	let snapshot_out = match snapshot_list.stdout(Stdio::piped())
 			.output()
-			.unwrap();
-	let stdout = String::from_utf8(snapshot_out.stdout).unwrap();
+			{
+				Err(e)=>{error!("Error getting snapshot_lit output:{}",e);return error},
+				Ok(snapshot_out)=>snapshot_out,
+			};
+
+	let stdout = match String::from_utf8(snapshot_out.stdout)
+				{
+					Err(e)=>{error!("Error converting snapshot_out to utf8:{}",e);error},
+					Ok(stdout)=>stdout,
+				};
 	let mut lines = stdout.lines();
-	let last_snapshot_full_path = lines.next().unwrap();
-	let (_, name) = last_snapshot_full_path.rsplit_once('@').unwrap();
+	let last_snapshot_full_path = match lines.next()
+								{
+									None=>"",
+									Some(lsfp)=>lsfp,
+								};
+	let name = rsplit_once(last_snapshot_full_path, '@');
 	return String::from(name)
 }
 
@@ -367,7 +434,7 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) -> bool
 		if does_dataset_exist_on_target(sourcedataset, targetdataset, targethost)
 		{
 			// dataset exists on target, but doesn't have any snapshots. can't replicate.
-			let (_, datasetname) = sourcedataset.rsplit_once('/').unwrap();
+			let datasetname = rsplit_once(sourcedataset, '/');
 			let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 
 			error!("Target dataset exists but has no snapshots. Can't replicate.");
@@ -473,15 +540,24 @@ async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, prev
 				sendc.arg(previous_snapshot_name);
 			}
 			sendc.arg(snapshot_name);
-		let mut sendo = sendc.stdout(Stdio::piped())
-			.spawn().unwrap();
-			//.expect("failed to spawn send");
+		let mut sendo = match sendc.stdout(Stdio::piped())
+			.spawn()
+			{
+				Err(e)=>{error!("Error getting senc stdout:{}",e);return replication_status},
+				Ok(sendo)=>sendo,
+			};
 		debug!("Created sendc & sendo");
-		let recv_stdin: Stdio = sendo.stdout
-			.take()
-			.unwrap()
-			.try_into()
-			.expect("failed to convert to Stdio");
+
+		let recv_stdin_a = match sendo.stdout.take()
+								{
+									None=>{error!("Failed to take sendo.stdout");return replication_status;},
+									Some(o)=>o,
+								};
+		let recv_stdin: Stdio = match recv_stdin_a.try_into()
+									{
+										Err(_e)=>{error!("Failed to try_into sendo.stdout");return replication_status;},
+										Ok(o)=>o,
+									};
 		debug!("Created recv_stdin");
 		let mut recvc = if targethost != "" { Command::new("ssh")}else{Command::new("zfs")};
 			if targethost != ""
@@ -503,25 +579,39 @@ async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, prev
 			recvc.arg("-u");
 			recvc.arg(targetdataset);
 			recvc.stdin(recv_stdin);
-		let mut recvo = recvc.stdout(Stdio::piped())
-			.spawn().unwrap();
-			//.expect("failed to spawn recv");
+		let mut recvo = match recvc.stdout(Stdio::piped())
+			.spawn()
+			{
+				Err(e)=>{error!("Error creating recvo. Replication may have occured: {}",e);return replication_status},
+				Ok(recvo)=>recvo,
+			};
 		debug!("Created recvc & recvo");
-		let stdout = recvo.stdout.take().unwrap();
+		let stdout = match recvo.stdout.take()
+								{
+									None=>{error!("Failed to take recvo.stdout. Replication may have occured.");return replication_status;},
+									Some(o)=>o,
+								};
 		debug!("got stdout from recvo");
 		let (send_output, recv_output) = (sendo.wait_with_output().await, recvo.wait_with_output().await);
 		debug!("waited output and have results.");
-		let so = send_output.unwrap();
+		let so = match send_output
+						{
+							Err(e) => {error!("Failed to get send_output. Replication may have occured:{}",e);return replication_status},
+							Ok(so)=>so,
+						};
 		if so.status.success()
 		{
-			//let recv_output = recv_output.expect("failed to await recv");
-			let ro = recv_output.unwrap();
+			let ro = match recv_output
+						{
+							Err(e) => {error!("Failed to get recv_output. Send was successful, but receive is unknown. Replication may have occured:{}",e);return replication_status},
+							Ok(ro)=>ro,
+						};
 			if ro.status.success()
 			{
 				replication_status=true;
 
 				let mut reader = BufReader::new(stdout).lines();
-				while let Some(line) = reader.next_line().await.unwrap() 
+				while let Some(line) = match reader.next_line().await {Ok(l)=>l,Err(e)=>{error!("Replication succeeded, but there was an error reading the results:{}",e);return replication_status} }
 				{
 					info!("ZFS RECV: {}", line);
 				}
@@ -616,7 +706,12 @@ async fn main()
 			}
 		}
 	}
-	stderrlog::new().module(module_path!()).verbosity(verbose).init().unwrap();
+
+	match stderrlog::new().module(module_path!()).verbosity(verbose).init()
+	{
+		Err(e) => {println!("Error creating stderrlog:{}",e);process::exit(10)},
+		Ok(l)=>l, // don't need to do anything for this case.
+	};
 
 	let piper = load_config(json_file_path);
 	if do_walk
