@@ -10,6 +10,7 @@ use chrono::{Local};
 struct Job 
 {
 	sourcedataset: String,
+	prefix: Option<String>,
 	recursive: bool,
 	targetdataset: String,
 }
@@ -33,6 +34,22 @@ fn load_config(file_path: &Path) -> Piper
 		Ok(piper) => piper,
 	};
 	return piper;
+}
+
+fn walk_json(piper: &Piper)
+{
+	for j in &piper.jobs
+	{
+		println!("Job:");
+		println!("\tSource Dataset:\"{}\"", j.sourcedataset);
+		match &j.prefix
+		{
+			None=>println!("\t\tPrefix: NO-PREFIX"),
+			Some(s)=>println!("\t\tPrefix: \"{}\"",s),
+		};
+		println!("\tRecursive:\"{}\"", j.recursive);
+		println!("\tTarget Dataset:\"{}\"", j.targetdataset);
+	}
 }
 
 fn usage()
@@ -65,6 +82,9 @@ fn usage()
 	printwrap::print_wrap(5,8,"  - Piper does not create snapshots, but at least one snapshot must exist in order to replicate a dataset. At least a second must exist in the source dataset and the first in both the source and destination datasets to perform an incremental replication. Piper will inspect the source and destination datasets to determine which snapshots to be used by using zfs list and sorting by the createtxg property. The source dataset must be local, but the destination dataset may be on a remote host indicated by prepending the \"<hostname>:\" to the target dataset name in the configuration.");
 	printwrap::print_wrap(5,8,"  - Piper does not care where these snapshots came from, but if the last snapshot used for replication is destroyed, further replication attempts will fail as incremential replication is always between a current snapshot the previous snapshot used. If that snapshot doesn't exist, it can't be used as a base for further replication.");
 	printwrap::print_wrap(5,8,"  - Piper does not destroy snapshots on the source, either, but the \"-F\" option on zfs receive does have the side effect/benefit of purging snapshots on the destination that no-longer exist on the source.");
+	printwrap::print_wrap(5,8,"  - Piper by default will replicate the first snapshot found for a given dataset. Sometimes this may not be desired. If one makes snapshots every 5 minutes *and* every hour, but purge the 5-minute snapshots after 2 hours, an initial replication at midnight may replicate the most recent 5-minute snapshot. However, an incremental replication the following night will attempt to perform an incremental between the current most recent 5-minute snapshot and the 5-minute snapshot from the previous night ... which would have been purged. This replication will fail. To avoid this, an optional field labeled \"prefix\" can be included in the configuration file. Piper will *only* replicate snapshots with this string at the beginning of the snapshot tag. For example, a configuration file with the line:");
+	printwrap::print_wrap(5,8,"              \"prefix\" : \"HOURLY__\",");
+	printwrap::print_wrap(5,8,"        for the replication job will only replicate snapshots which begin with \"HOURLY__\", and ignore all others. If no other snapshots exist, replication will not happen.");
 	printwrap::print_wrap(5,8,"");
 	printwrap::print_wrap(5,0,"All piper logging is to stdout.");
 	printwrap::print_wrap(5,0,"");
@@ -72,10 +92,6 @@ fn usage()
 	printwrap::print_wrap(5,0,"    5  0  *  *  *    /usr/local/bin/piper  >> /var/log/piper.log 2>&1");
 	printwrap::print_wrap(5,8,"or, for hourly replication:");
 	printwrap::print_wrap(5,0,"    5  *  *  *  *    /usr/local/bin/piper  >> /var/log/piper.log 2>&1");
-	//"The name piper refers to the piping of output from zfs send to zfs receive.",
-	//"It was just a working name, but stuck (as is often the case). Also, there's",
-	//"a completely unwarranted vague reference to a album by a well-known light",
-	//"red prog-rock band.",
 	printwrap::print_wrap(5,8,"");
 
 	process::exit(1);
@@ -304,7 +320,7 @@ fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&st
 	}
 }
 
-fn get_most_recent_snapshot(dataset:&str, host:&str) -> String
+fn get_most_recent_snapshot(dataset:&str, host:&str, prefix: &str) -> String
 {
 	let error=String::from("//!!--XX--ERROR--XX--!!\\\\"); 
 	info!("get most recent snapshot named \"{}\" on \"{}\"", dataset, host);
@@ -337,14 +353,32 @@ fn get_most_recent_snapshot(dataset:&str, host:&str) -> String
 					Err(e)=>{error!("Error converting snapshot_out to utf8:{}",e);error},
 					Ok(stdout)=>stdout,
 				};
-	let mut lines = stdout.lines();
-	let last_snapshot_full_path = match lines.next()
-								{
-									None=>"",
-									Some(lsfp)=>lsfp,
-								};
-	let name = rsplit_once(last_snapshot_full_path, '@');
-	return String::from(name)
+
+	for line in stdout.lines()
+	{
+		trace!("Examning snapshot \"{}\"", line);
+		let name = rsplit_once(line, '@');
+		trace!("\t tag \"{}\"", name);
+		if prefix == ""
+		{
+			trace!("\t Prefix is empty, so take this, the first result.");
+			return String::from(name);
+		}
+		else
+		{
+			trace!("\t Prefix is \"{}\"", prefix);
+			if name.starts_with(prefix)
+			{
+				trace!("\t\tName starts with prefix, so return this result.");
+				return String::from(name);
+			}
+			else
+			{
+				trace!("\t\tName does NOT start with prefix, on to the next result...");
+			}
+		}
+	}
+	return String::from("")
 }
 
 fn split_host_and_dataset(string:&str) -> (&str, &str)
@@ -371,6 +405,11 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) -> bool
 	let (sourcehost,sourcedataset)=split_host_and_dataset(&j.sourcedataset);
 	let (targethost,targetdataset)=split_host_and_dataset(&j.targetdataset);
 	let recursive=j.recursive;
+	let prefix = match &j.prefix
+		{
+			None=>"",
+			Some(s)=>s,
+		};
 
 	let encrypted=is_dataset_encrypted(sourcedataset);
 	if sourcehost != ""
@@ -396,7 +435,7 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) -> bool
 	info!("targetdataset: \"{}\"", targetdataset);
 	info!("encrypted: \"{}\"", encrypted);
 
-	let current_snapshot_name=get_most_recent_snapshot(sourcedataset, sourcehost);
+	let current_snapshot_name=get_most_recent_snapshot(sourcedataset, sourcehost, prefix);
 	let previous_snapshot_name=get_last_replicated_snapshot(sourcedataset, targetdataset, targethost);
 	if previous_snapshot_name != ""
 	{
@@ -716,8 +755,10 @@ async fn main()
 	let piper = load_config(json_file_path);
 	if do_walk
 	{
-		process::exit(1);
+		walk_json(&piper);
+		process::exit(0);
 	}
+
 	let start_time = Local::now();
 	info!("--------------------------------------------------------------------------------");
 	info!("{}", start_time);
