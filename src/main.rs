@@ -89,9 +89,9 @@ fn usage()
 	printwrap::print_wrap(5,0,"All piper logging is to stdout.");
 	printwrap::print_wrap(5,0,"");
 	printwrap::print_wrap(5,0,"Piper is intended to be run via cron. When running from cron, the frequency piper is run should correspond to the most frequent snapshots for each dataset to be replicated. Run piper a few minutes after the snapshots are scheduled. If you make daily snapshots there is no need to run piper more frequently. It won't hurt, but isn't necessary. A typical cron line for daily replication might look like this:");
-	printwrap::print_wrap(5,0,"    5  0  *  *  *    /usr/local/bin/piper  >> /var/log/piper.log 2>&1");
+	printwrap::print_wrap(5,0,"    5  0  *  *  *    /usr/local/bin/piper  &>> /var/log/piper.log");
 	printwrap::print_wrap(5,8,"or, for hourly replication:");
-	printwrap::print_wrap(5,0,"    5  *  *  *  *    /usr/local/bin/piper  >> /var/log/piper.log 2>&1");
+	printwrap::print_wrap(5,0,"    5  *  *  *  *    /usr/local/bin/piper  &>> /var/log/piper.log");
 	printwrap::print_wrap(5,8,"");
 
 	process::exit(1);
