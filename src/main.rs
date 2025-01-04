@@ -107,7 +107,7 @@ fn print_config()
 fn can_login_to_host(host:&str) -> bool
 {
 	let mut can_login_status=false;
-	info!("Can log into host \"{}\"", host);
+	debug!("can log into host \"{}\"", host);
 	debug!("testing \"ssh {} exit\"",host);
 	let mut can_login = std::process::Command::new("ssh");
 			can_login.arg(host);
@@ -137,14 +137,14 @@ fn can_login_to_host(host:&str) -> bool
 			error!("{}",line);
 		}
 	}
-	debug!("Can_login_to_host: \"{}\"", can_login_status);
+	debug!("\t\t{}", can_login_status);
 	return can_login_status;
 }
 
 //is_dataset_encrypted needs to return a Result<T> as bool isn't sufficient (i.e. results need to be true,false,error)
 fn is_dataset_encrypted(padding:&str,host: &str, dataset:&str) -> bool
 {
-	info!("{}is dataset encrypted {}",padding , dataset);
+	debug!("{}is dataset encrypted {}",padding , dataset);
 	let full_command = format!("zfs list -H -t filesystem -o encryption  {}",dataset);
 	debug!("{}{}", padding, full_command);
 	//let fs_list = match std::process::Command::new("zfs")
@@ -180,14 +180,14 @@ fn is_dataset_encrypted(padding:&str,host: &str, dataset:&str) -> bool
 									None=>"",
 								});
 	let is_encrypted = if line == "off" { false} else {true};
-
+	debug!("\t\t{}", is_encrypted);
 	return is_encrypted;
 }
 
 fn get_child_datasets(padding: &str, host: &str, dataset:&str) -> Vec<String>
 {
 	let mut vector:Vec<String> = Vec::new();
-	info!("{}get child datasets \"{}\"", padding, dataset);
+	info!("{}Get child datasets \"{}\"", padding, dataset);
 	debug!("{}zfs list -H -d 1 -t filesystem -o name -s createtxg {}", padding,dataset);
 	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
@@ -220,19 +220,18 @@ fn get_child_datasets(padding: &str, host: &str, dataset:&str) -> Vec<String>
 	// the output of the zfs list command will include not only the child
 	// datasets, but the parent dataset itself. this will be the first result
 	// so we need to skip the first result, and *not* add it to the vector.
-	let mut first = true;
+	let mut count = 0;
 	for line in stdout.lines()
 	{
-		if first
+		if count > 0
 		{
-			first = false;
-		}
-		else
-		{
-			debug!("{}Child Dataset:\"{}\"", padding, line);
+			debug!("{}\tChild Dataset:\"{}\"", padding, line);
 			vector.push(String::from(line));
 		}
+		count = count +1;
 	}
+	let ess=if count == 2 {""} else {"s"};
+	info!("{}\t{} child dataset{}.",padding, ess, (count-1));
 	return vector
 }
 
@@ -250,7 +249,7 @@ fn rsplit_once(source:&str, split_on:char) -> String
 fn does_dataset_exist_on_target(padding:&str, sourcedataset:&str, targetdataset:&str, host:&str) -> bool
 {
 	let mut dataset_exists=false;
-	info!("{}does source dataset ({}) exist in \"{}\" on \"{}\"", padding, sourcedataset, targetdataset, host);
+	info!("{}Does source dataset ({}) exist in \"{}\" on \"{}\"", padding, sourcedataset, targetdataset, host);
 	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
@@ -276,7 +275,7 @@ fn does_dataset_exist_on_target(padding:&str, sourcedataset:&str, targetdataset:
 				Err(e)=> {error!("{}Error getting dataset_list_out:{}", padding,e);return false},
 				Ok(dataset_list_out)=>dataset_list_out,
 			};
-	info!("{}dataset_list_out status: \"{}\"", padding, match dataset_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
+	info!("{}Dataset_list_out status: \"{}\"", padding, match dataset_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
 	if dataset_list_out.status.success()
 	{
 		// maybe should be info! rather than debug!
@@ -295,7 +294,7 @@ fn does_dataset_exist_on_target(padding:&str, sourcedataset:&str, targetdataset:
 fn get_last_replicated_snapshot(padding:&str, sourcedataset:&str, targetdataset:&str, host:&str) -> String
 {
 	let error_value = String::from("");
-	info!("{}get last replicated snapshot named \"{}\" in \"{}\" on \"{}\"", padding, sourcedataset, targetdataset, host);
+	debug!("{}get last replicated snapshot named \"{}\" in \"{}\" on \"{}\"", padding, sourcedataset, targetdataset, host);
 	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
@@ -326,13 +325,13 @@ fn get_last_replicated_snapshot(padding:&str, sourcedataset:&str, targetdataset:
 							Err(e)=>{error!("{}Error converting output to UTF8:{}", padding,e);error_value},
 							Ok(stdout)=>stdout
 						};
-	info!("{}snapshot_out status: \"{}\"", padding, match snapshot_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
+	debug!("{}snapshot_out status: \"{}\"", padding, match snapshot_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
 	if snapshot_out.status.success()
 	{
 		let line = stdout.lines().next();
 		if let None = line
 		{
-			info!("{}No last replicated snapshot", padding);
+			debug!("{}No last replicated snapshot", padding);
 			return String::from("")
 		}
 		let uline = match line
@@ -341,7 +340,7 @@ fn get_last_replicated_snapshot(padding:&str, sourcedataset:&str, targetdataset:
 							Some(ul)=>ul,
 						};
 		let name = rsplit_once(uline, '@');
-		info!("{}Last replicated snapshot:\"{}\"", padding, name);
+		debug!("{}Last replicated snapshot:\"{}\"", padding, name);
 		return String::from(name);
 	}
 	else
@@ -354,7 +353,7 @@ fn get_last_replicated_snapshot(padding:&str, sourcedataset:&str, targetdataset:
 fn get_most_recent_snapshot(padding:&str, dataset:&str, host:&str, prefix: &str) -> String
 {
 	let error=String::from("//!!--XX--ERROR--XX--!!\\\\"); 
-	info!("{}get most recent snapshot named \"{}\" on \"{}\"", padding, dataset, host);
+	debug!("{}get most recent snapshot named \"{}\" on \"{}\"", padding, dataset, host);
 	debug!("{}zfs list -H -t snapshot -o name -S createtxg {}", padding,dataset);
 
 	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
@@ -400,7 +399,7 @@ fn get_most_recent_snapshot(padding:&str, dataset:&str, host:&str, prefix: &str)
 			trace!("{}\t Prefix is \"{}\"", padding, prefix);
 			if name.starts_with(prefix)
 			{
-				trace!("{}\t\tName starts with prefix, so return this result.", padding);
+				debug!("{}\t\tName starts with prefix, so return this result: \"{}\"", padding, name);
 				return String::from(name);
 			}
 			else
@@ -409,6 +408,7 @@ fn get_most_recent_snapshot(padding:&str, dataset:&str, host:&str, prefix: &str)
 			}
 		}
 	}
+	debug!("No recent snapshot.");
 	return String::from("")
 }
 
@@ -480,14 +480,20 @@ async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedata
 		info!("{}Recursive = True.  Examining child datasets...",opadding);
 		// process child datasets
 		let npadding = format!("\t{}",opadding);
+		let mut count=0;
 		for child_data_set in children.iter()
 		{
-			debug!("{}Recursively examining child dataset \"{}\"",npadding,child_data_set);
+			count = count +1;
+			debug!("{}Recursively examining child dataset #{} \"{}\"",count ,npadding,child_data_set);
 			// targetdataset is not correct
 			// targetdataset needs to be targetdataset/sourcedataset_name
 			let child_dataset_name = rsplit_once(sourcedataset, '/');
 			let child_target_dataset=format!("{}/{}",targetdataset,child_dataset_name);
 			process_dataset_intermediate(npadding.as_str(), sourcehost, child_data_set, targethost,child_target_dataset.as_str(), recursive, prefix, send_no_op, recv_no_op ).await;
+		}
+		if count == 0
+		{
+			info!("No child datasets!");
 		}
 	}
 	else
@@ -606,7 +612,7 @@ async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_
 		let mut sendc = if sourcehost != "" {Command::new("ssh")} else { Command::new("zfs")};
 			if sourcehost != ""
 			{
-				info!("pull from {}", sourcehost);
+				info!("Pull from {}", sourcehost);
 				sendc.arg(sourcehost);
 				sendc.arg("zfs");
 			}
@@ -663,7 +669,7 @@ async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_
 		let mut recvc = if targethost != "" { Command::new("ssh")}else{Command::new("zfs")};
 			if targethost != ""
 			{
-				info!("{}push to {}",padding, targethost);
+				info!("{}Push to {}",padding, targethost);
 				recvc.arg(targethost);
 				recvc.arg("zfs");
 			}
