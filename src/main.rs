@@ -231,7 +231,7 @@ fn get_child_datasets(padding: &str, host: &str, dataset:&str) -> Vec<String>
 		count = count +1;
 	}
 	let ess=if count == 2 {""} else {"s"};
-	info!("{}\t{} child dataset{}.",padding, ess, (count-1));
+	info!("{}\t{} child dataset{}.",padding, (count-1), ess);
 	return vector
 }
 
@@ -493,7 +493,7 @@ async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedata
 		}
 		if count == 0
 		{
-			info!("No child datasets!");
+			info!("{}No child datasets!",opadding);
 		}
 	}
 	else
