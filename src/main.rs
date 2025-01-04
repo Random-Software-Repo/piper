@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use log::*;
 use std::{process,env,fs::File,path::Path, process::Stdio,str};
 use chrono::{Local};
+use async_recursion::async_recursion;
 
 #[derive(Serialize, Deserialize)]
 struct Job 
@@ -141,28 +142,35 @@ fn can_login_to_host(host:&str) -> bool
 }
 
 //is_dataset_encrypted needs to return a Result<T> as bool isn't sufficient (i.e. results need to be true,false,error)
-fn is_dataset_encrypted(dataset:&str) -> bool
+fn is_dataset_encrypted(padding:&str,host: &str, dataset:&str) -> bool
 {
-	info!("is dataset encrypted {}", dataset);
+	info!("{}is dataset encrypted {}",padding , dataset);
 	let full_command = format!("zfs list -H -t filesystem -o encryption  {}",dataset);
-	debug!("{}",full_command);
-	let fs_list = match std::process::Command::new("zfs")
-			.arg("list")
-			.arg("-H")
-			.arg("-t")
-			.arg("filesystem")
-			.arg("-o")
-			.arg("encryption")
-			.arg(dataset)
-			.stdout(Stdio::piped())
+	debug!("{}{}", padding, full_command);
+	//let fs_list = match std::process::Command::new("zfs")
+	let mut fs_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
+			if host != ""
+			{
+				fs_list.arg(host);
+				fs_list.arg("zfs");
+			}
+			fs_list.arg("list");
+			fs_list.arg("-H");
+			fs_list.arg("-t");
+			fs_list.arg("filesystem");
+			fs_list.arg("-o");
+			fs_list.arg("encryption");
+			fs_list.arg(dataset);
+			fs_list.stdout(Stdio::piped());
+			let fs_list_output= match fs_list.stdout(Stdio::piped())
 			.output()
 			{
-				Err(e)=>{error!("Error on \"{}\":{}",full_command,e);return false},// this isn't good enough
-				Ok(fs_list)=>fs_list,
-			};
-	let stdout = match String::from_utf8(fs_list.stdout)
+				Err(e)=>{error!("{}Error getting is dataset encrypted output:{}", padding,e);return false },
+				Ok(fs_list_output)=>fs_list_output,
+			};			
+	let stdout = match String::from_utf8(fs_list_output.stdout)
 				{
-					Err(e)=> {error!("error converting fs_list output to utf8: {}",e);return false},
+					Err(e)=> {error!("{}error converting fs_list output to utf8: {}", padding,e);return false},
 					Ok(stdout)=>stdout,
 				};
 	let mut lines = stdout.lines();
@@ -176,12 +184,17 @@ fn is_dataset_encrypted(dataset:&str) -> bool
 	return is_encrypted;
 }
 
-fn get_child_datasets(dataset:&str) -> String
+fn get_child_datasets(padding: &str, host: &str, dataset:&str) -> Vec<String>
 {
-	let error_value=String::from("");
-	info!("get child datasets \"{}\"", dataset);
-	debug!("zfs list -H -d 2 -t filesystem -o name {}",dataset);
-	let mut snapshot_list = std::process::Command::new("zfs");
+	let mut vector:Vec<String> = Vec::new();
+	info!("{}get child datasets \"{}\"", padding, dataset);
+	debug!("{}zfs list -H -d 1 -t filesystem -o name -s createtxg {}", padding,dataset);
+	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
+			if host != ""
+			{
+				snapshot_list.arg(host);
+				snapshot_list.arg("zfs");
+			}
 			snapshot_list.arg("list");
 			snapshot_list.arg("-H");
 			snapshot_list.arg("-d");
@@ -190,19 +203,37 @@ fn get_child_datasets(dataset:&str) -> String
 			snapshot_list.arg("filesystem");
 			snapshot_list.arg("-o");
 			snapshot_list.arg("name");
+			snapshot_list.arg("-s");
+			snapshot_list.arg("createtxg");
 			snapshot_list.arg(dataset);
 	let snapshot_output= match snapshot_list.stdout(Stdio::piped())
 			.output()
 			{
-				Err(e)=>{error!("Error getting child datasets output:{}",e);return error_value },
+				Err(e)=>{error!("{}Error getting child datasets output:{}", padding,e);return vector },
 				Ok(snapshot_output)=>snapshot_output,
 			};
 	let stdout = match String::from_utf8(snapshot_output.stdout)
 			{
-				Err(e)=>{error!("Error converting child datasets output to uft8:{}",e);return error_value },
+				Err(e)=>{error!("{}Error converting child datasets output to uft8:{}", padding,e);return vector },
 				Ok(stdout)=>stdout,
 			};
-	return stdout
+	// the output of the zfs list command will include not only the child
+	// datasets, but the parent dataset itself. this will be the first result
+	// so we need to skip the first result, and *not* add it to the vector.
+	let mut first = true;
+	for line in stdout.lines()
+	{
+		if first
+		{
+			first = false;
+		}
+		else
+		{
+			debug!("{}Child Dataset:\"{}\"", padding, line);
+			vector.push(String::from(line));
+		}
+	}
+	return vector
 }
 
 fn rsplit_once(source:&str, split_on:char) -> String
@@ -216,14 +247,14 @@ fn rsplit_once(source:&str, split_on:char) -> String
 }
 
 // probably need Result<T> here as well: true,false,error
-fn does_dataset_exist_on_target(sourcedataset:&str, targetdataset:&str, host:&str) -> bool
+fn does_dataset_exist_on_target(padding:&str, sourcedataset:&str, targetdataset:&str, host:&str) -> bool
 {
 	let mut dataset_exists=false;
-	info!("does source dataset ({}) exist in \"{}\" on \"{}\"", sourcedataset, targetdataset, host);
+	info!("{}does source dataset ({}) exist in \"{}\" on \"{}\"", padding, sourcedataset, targetdataset, host);
 	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
-	debug!("{}zfs list -H -t filesystem -o name -S createtxg {}",ssh,targetdatasetname);
+	debug!("{}{}zfs list -H -t filesystem -o name -S createtxg {}", padding,ssh,targetdatasetname);
 	let mut dataset_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
 			{
@@ -242,33 +273,33 @@ fn does_dataset_exist_on_target(sourcedataset:&str, targetdataset:&str, host:&st
 	let dataset_list_out= match dataset_list.stdout(Stdio::piped())
 			.output()
 			{
-				Err(e)=> {error!("Error getting dataset_list_out:{}",e);return false},
+				Err(e)=> {error!("{}Error getting dataset_list_out:{}", padding,e);return false},
 				Ok(dataset_list_out)=>dataset_list_out,
 			};
-	info!("dataset_list_out status: \"{}\"", match dataset_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
+	info!("{}dataset_list_out status: \"{}\"", padding, match dataset_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
 	if dataset_list_out.status.success()
 	{
 		// maybe should be info! rather than debug!
-		debug!("Dataset exists on target.");
+		debug!("{}Dataset exists on target.", padding);
 		dataset_exists = true;
 	}
 	else
 	{
 		// maybe should be info! rather than debug!
-		debug!("Dataset does not exist on target.");
+		debug!("{}Dataset does not exist on target.", padding);
 	}
 	return dataset_exists;
 }
 
 
-fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&str) -> String
+fn get_last_replicated_snapshot(padding:&str, sourcedataset:&str, targetdataset:&str, host:&str) -> String
 {
 	let error_value = String::from("");
-	info!("get last replicated snapshot named \"{}\" in \"{}\" on \"{}\"", sourcedataset, targetdataset, host);
+	info!("{}get last replicated snapshot named \"{}\" in \"{}\" on \"{}\"", padding, sourcedataset, targetdataset, host);
 	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
-	debug!("{}zfs list -H -t snapshot -o name -S createtxg {}",ssh,targetdatasetname);
+	debug!("{}{}zfs list -H -t snapshot -o name -S createtxg {}", padding,ssh,targetdatasetname);
 	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
 			{
@@ -287,21 +318,21 @@ fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&st
 	let snapshot_out= match snapshot_list.stdout(Stdio::piped())
 			.output()
 			{
-				Err(e)=> {error!("Error getting snapshot_list stdout {}",e);return error_value},
+				Err(e)=> {error!("{}Error getting snapshot_list stdout {}", padding,e);return error_value},
 				Ok(snapshot_out)=>snapshot_out,
 			};
 	let stdout = match String::from_utf8(snapshot_out.stdout)
 						{
-							Err(e)=>{error!("Error converting output to UTF8:{}",e);error_value},
+							Err(e)=>{error!("{}Error converting output to UTF8:{}", padding,e);error_value},
 							Ok(stdout)=>stdout
 						};
-	info!("snapshot_out status: \"{}\"", match snapshot_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
+	info!("{}snapshot_out status: \"{}\"", padding, match snapshot_list.status() { Err(e)=>{format!("{}",e)},Ok(o)=>format!("{}",o)});
 	if snapshot_out.status.success()
 	{
 		let line = stdout.lines().next();
 		if let None = line
 		{
-			info!("No last replicated snapshot");
+			info!("{}No last replicated snapshot", padding);
 			return String::from("")
 		}
 		let uline = match line
@@ -310,21 +341,21 @@ fn get_last_replicated_snapshot(sourcedataset:&str, targetdataset:&str, host:&st
 							Some(ul)=>ul,
 						};
 		let name = rsplit_once(uline, '@');
-		info!("Last replicated snapshot:\"{}\"", name);
+		info!("{}Last replicated snapshot:\"{}\"", padding, name);
 		return String::from(name);
 	}
 	else
 	{
-		error!("Dataset does not exist on target. Has not been replicated yet.");
+		error!("{}Dataset does not exist on target. Has not been replicated yet.", padding);
 		return String::from("");
 	}
 }
 
-fn get_most_recent_snapshot(dataset:&str, host:&str, prefix: &str) -> String
+fn get_most_recent_snapshot(padding:&str, dataset:&str, host:&str, prefix: &str) -> String
 {
 	let error=String::from("//!!--XX--ERROR--XX--!!\\\\"); 
-	info!("get most recent snapshot named \"{}\" on \"{}\"", dataset, host);
-	debug!("zfs list -H -t snapshot -o name -S createtxg {}",dataset);
+	info!("{}get most recent snapshot named \"{}\" on \"{}\"", padding, dataset, host);
+	debug!("{}zfs list -H -t snapshot -o name -S createtxg {}", padding,dataset);
 
 	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
@@ -344,37 +375,37 @@ fn get_most_recent_snapshot(dataset:&str, host:&str, prefix: &str) -> String
 	let snapshot_out = match snapshot_list.stdout(Stdio::piped())
 			.output()
 			{
-				Err(e)=>{error!("Error getting snapshot_lit output:{}",e);return error},
+				Err(e)=>{error!("{}Error getting snapshot_lit output:{}", padding,e);return error},
 				Ok(snapshot_out)=>snapshot_out,
 			};
 
 	let stdout = match String::from_utf8(snapshot_out.stdout)
 				{
-					Err(e)=>{error!("Error converting snapshot_out to utf8:{}",e);error},
+					Err(e)=>{error!("{}Error converting snapshot_out to utf8:{}", padding,e);error},
 					Ok(stdout)=>stdout,
 				};
 
 	for line in stdout.lines()
 	{
-		trace!("Examning snapshot \"{}\"", line);
+		trace!("{}Examining snapshot \"{}\"", padding, line);
 		let name = rsplit_once(line, '@');
-		trace!("\t tag \"{}\"", name);
+		trace!("{}\t tag \"{}\"", padding, name);
 		if prefix == ""
 		{
-			trace!("\t Prefix is empty, so take this, the first result.");
+			trace!("{}\t Prefix is empty, so take this, the first result.", padding);
 			return String::from(name);
 		}
 		else
 		{
-			trace!("\t Prefix is \"{}\"", prefix);
+			trace!("{}\t Prefix is \"{}\"", padding, prefix);
 			if name.starts_with(prefix)
 			{
-				trace!("\t\tName starts with prefix, so return this result.");
+				trace!("{}\t\tName starts with prefix, so return this result.", padding);
 				return String::from(name);
 			}
 			else
 			{
-				trace!("\t\tName does NOT start with prefix, on to the next result...");
+				trace!("{}\t\tName does NOT start with prefix, on to the next result...", padding);
 			}
 		}
 	}
@@ -399,9 +430,8 @@ fn split_host_and_dataset(string:&str) -> (&str, &str)
 	(host, dataset)
 }
 
-async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) -> bool
+async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) 
 {
-	let mut completed=true;
 	let (sourcehost,sourcedataset)=split_host_and_dataset(&j.sourcedataset);
 	let (targethost,targetdataset)=split_host_and_dataset(&j.targetdataset);
 	let recursive=j.recursive;
@@ -411,56 +441,100 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) -> bool
 			Some(s)=>s,
 		};
 
-	let encrypted=is_dataset_encrypted(sourcedataset);
+	// check if we can login to the source or target hosts (if remote)
+	// if we can't login, then there's nothing else we can do, so quit the job early.
 	if sourcehost != ""
 	{
 		info!("sourcehost: \"{}\"", sourcehost);
 		if !can_login_to_host(sourcehost)
 		{
 			error!("Can't replicate: can't login to source host {}.", targethost);
-			return false;
+			return
 		}
 	}
-	info!("sourcedataset: \"{}\"", sourcedataset);
-	info!("recursive: \"{}\"", recursive);
 	if targethost != ""
 	{
 		info!("targethost: \"{}\"", targethost);
 		if !can_login_to_host(targethost)
 		{
 			error!("Can't replicate: can't login to target host {}.", targethost);
-			return false;
+			return
 		}
 	}
-	info!("targetdataset: \"{}\"", targetdataset);
-	info!("encrypted: \"{}\"", encrypted);
 
-	let current_snapshot_name=get_most_recent_snapshot(sourcedataset, sourcehost, prefix);
-	let previous_snapshot_name=get_last_replicated_snapshot(sourcedataset, targetdataset, targethost);
+	process_dataset_intermediate("", sourcehost, sourcedataset, targethost,targetdataset, recursive, prefix, send_no_op, recv_no_op).await;
+}
+
+/*
+	process_dataset_intermediate
+	this is a function mostly to make handling recursive async calls clean enough to handle
+	with #[async_recursion]
+	it also make the recursion a little easier to keep clear in a hypothetical programmer's head.
+*/
+#[async_recursion]
+async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)
+{
+	let children= process_dataset(opadding, sourcehost, sourcedataset, targethost,targetdataset, recursive, prefix, send_no_op, recv_no_op).await;
+	if recursive
+	{
+		info!("{}Recursive = True.  Examining child datasets...",opadding);
+		// process child datasets
+		let npadding = format!("\t{}",opadding);
+		for child_data_set in children.iter()
+		{
+			debug!("{}Recursively examining child dataset \"{}\"",npadding,child_data_set);
+			// targetdataset is not correct
+			// targetdataset needs to be targetdataset/sourcedataset_name
+			let child_dataset_name = rsplit_once(sourcedataset, '/');
+			let child_target_dataset=format!("{}/{}",targetdataset,child_dataset_name);
+			process_dataset_intermediate(npadding.as_str(), sourcehost, child_data_set, targethost,child_target_dataset.as_str(), recursive, prefix, send_no_op, recv_no_op ).await;
+		}
+	}
+	else
+	{
+		info!("{}Recursive = False. Ignoring child datasets...",opadding);
+	}
+
+}
+
+async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)-> Vec<String>
+{
+	//let spadding = format!("    {}",opadding);
+	//let padding = spadding.as_str();
+	//let mut completed=true;
+	let encrypted=is_dataset_encrypted(padding, sourcehost,sourcedataset);
+	info!("{}sourcedataset: \"{}\"", padding, sourcedataset);
+	info!("{}recursive: \"{}\"", padding, recursive);
+	info!("{}targetdataset: \"{}\"", padding, targetdataset);
+	info!("{}encrypted: \"{}\"", padding, encrypted);
+
+	let current_snapshot_name=get_most_recent_snapshot(padding, sourcedataset, sourcehost, prefix);
+	let previous_snapshot_name=get_last_replicated_snapshot(padding, sourcedataset, targetdataset, targethost);
+	let child_datasets = get_child_datasets(padding, sourcehost, sourcedataset);
 	if previous_snapshot_name != ""
 	{
-		info!("{} exists on target. Dataset has been replicated, so we'll check most recent snapshot.", &j.sourcedataset);
+		info!("{}{} exists on target. Dataset has been replicated, so we'll check most recent snapshot.", padding, sourcedataset);
 		if  previous_snapshot_name != current_snapshot_name
 		{
-			info!("\"{}\" != \"{}\"", previous_snapshot_name, current_snapshot_name);
-			info!("Snapshots do not match, doing incremental replication.");
+			info!("{}\"{}\" != \"{}\"", padding, previous_snapshot_name, current_snapshot_name);
+			info!("{}Snapshots do not match, doing incremental replication.", padding);
 			let current_snapshot_name_full = format!("{}@{}", sourcedataset, current_snapshot_name);
 			let previous_snapshot_name_full = format!("{}@{}", sourcedataset, previous_snapshot_name);
 
-			if replicate(sourcehost, sourcedataset,current_snapshot_name_full.as_str(), previous_snapshot_name_full.as_str(), encrypted, recursive, targethost, targetdataset, send_no_op, recv_no_op).await
+			if replicate(padding, sourcehost, sourcedataset,current_snapshot_name_full.as_str(), previous_snapshot_name_full.as_str(), encrypted, recursive, &child_datasets, targethost, targetdataset, send_no_op, recv_no_op).await
 			{
-				info!("Incremental Replication succeeded.");
+				info!("{}Incremental Replication succeeded.", padding);
 			}
 			else
 			{
-				error!("Incremental Replication failed.");
-				completed=false;
+				error!("{}Incremental Replication failed.", padding);
+				//completed=false;
 			}
 		}
 		else
 		{
 			// dataset has been replciated, snapshot's match so no additional replication required no
-			info!("Snapshot's match, so no additional replication required now.");
+			info!("{}Snapshot's match, so no additional replication required now.", padding);
 		}
 	}
 	else
@@ -470,64 +544,64 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool) -> bool
 		// we've already established there are not snapshots, but we need to check for the dataset.
 		// if the dataset exists without any snapshots, we can't replicate as that would overwrite the
 		// existing dataset and zfs recv will not do that.
-		if does_dataset_exist_on_target(sourcedataset, targetdataset, targethost)
+		if does_dataset_exist_on_target(padding, sourcedataset, targetdataset, targethost)
 		{
 			// dataset exists on target, but doesn't have any snapshots. can't replicate.
 			let datasetname = rsplit_once(sourcedataset, '/');
 			let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 
-			error!("Target dataset exists but has no snapshots. Can't replicate.");
-			error!("To \"fix\" this either replicate to another parent dataset, or");
-			error!("destroy the target dateset: \"{}\" on {}, and then",targetdatasetname, if targethost==""{"lostalhost"}else{targethost});
-			error!("re-reun the replication.");
-			error!("!!!! THIS WILL DESTROY DATA !!!!");
-			error!("DO NOT DO THIS UNLESS YOU ARE VERY SURE IT IS THE CORRECT ACTION TO TAKE.");
+			error!("{}Target dataset exists but has no snapshots. Can't replicate.", padding);
+			error!("{}To \"fix\" this either replicate to another parent dataset, or", padding);
+			error!("{}destroy the target dataset: \"{}\" on {}, and then", padding,targetdatasetname, if targethost==""{"lostalhost"}else{targethost});
+			error!("{}re-reun the replication.", padding);
+			error!("{}!!!! THIS WILL DESTROY DATA !!!!", padding);
+			error!("{}DO NOT DO THIS UNLESS YOU ARE VERY SURE IT IS THE CORRECT ACTION TO TAKE.", padding);
 		}
 		else
 		{
-			info!("{} does not exist on target. No replication has occured, full replication commencing.", &j.sourcedataset);
-			info!("Last snapshot made: \"{}\"", current_snapshot_name);
+			info!("{}{} does not exist on target. No replication has occured, full replication commencing.", padding, sourcedataset);
+			info!("{}Last snapshot made: \"{}\"", padding, current_snapshot_name);
 
 			let current_snapshot_name_full = format!("{}@{}", sourcedataset, current_snapshot_name);
-			if replicate(sourcehost, sourcedataset,current_snapshot_name_full.as_str(), "", encrypted, recursive, targethost, targetdataset, send_no_op, recv_no_op).await
+			if replicate(padding, sourcehost, sourcedataset,current_snapshot_name_full.as_str(), "", encrypted, recursive, &child_datasets, targethost, targetdataset, send_no_op, recv_no_op).await
 			{
-				info!("Full Replication succeeded.");
+				info!("{}Full Replication succeeded.", padding);
 			}
 			else
 			{
-				error!("Full Replication failed.");
-				completed=false;
+				error!("{}Full Replication failed.", padding);
+				//completed=false;
 			}
 		}
 	}
-	return completed;
+	return child_datasets;
 }
 
-async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, previous_snapshot_name:&str, 
-					encrypted:bool, recursive:bool, targethost:&str, targetdataset:&str, 
+async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_name:&str, previous_snapshot_name:&str, 
+					encrypted:bool, recursive:bool, child_datasets:&Vec<String>, targethost:&str, targetdataset:&str, 
 					send_no_op:bool, recv_no_op:bool) -> bool
 {
 	let mut replication_status = false;
-	info!("REPLICATE");
-	info!("sourcehost            : \"{}\"", sourcehost);
-	info!("snapshot_name         : \"{}\"", snapshot_name);
-	info!("previous_snapshot_name: \"{}\"", previous_snapshot_name);
-	info!("encrypted             : \"{}\"", encrypted);
-	info!("recursive             : \"{}\"", recursive);
-	info!("targethost            : \"{}\"", targethost);
-	info!("targetdataset         : \"{}\"", targetdataset);
-	info!("send_no_op            : \"{}\"", send_no_op);
-	info!("recv_no_op            : \"{}\"", recv_no_op);
+	info!("{}REPLICATE",padding);
+	info!("{}sourcehost            : \"{}\"",padding, sourcehost);
+	info!("{}snapshot_name         : \"{}\"",padding, snapshot_name);
+	info!("{}previous_snapshot_name: \"{}\"",padding, previous_snapshot_name);
+	info!("{}encrypted             : \"{}\"",padding, encrypted);
+	info!("{}recursive             : \"{}\"",padding, recursive);
+	info!("{}targethost            : \"{}\"",padding, targethost);
+	info!("{}targetdataset         : \"{}\"",padding, targetdataset);
+	info!("{}send_no_op            : \"{}\"",padding, send_no_op);
+	info!("{}recv_no_op            : \"{}\"",padding, recv_no_op);
 
 	if snapshot_name == previous_snapshot_name
 	{
 		// This condition should never happen here as this is checked in process_job prior to
 		// calling replicate. But... it doesn't hurt to have it here.
-		info!("Current/Previous snapshots are the same. Can't replicate 'cause there's nothing new to replicate.");
+		info!("{}Current/Previous snapshots are the same. Can't replicate 'cause there's nothing new to replicate.",padding);
 	}
 	else
 	{
-		info!("Sending \"{}\":\"{}\" to \"{}\":\"{}\"", sourcehost, snapshot_name, targethost, targetdataset);
+		info!("{}Sending \"{}\":\"{}\" to \"{}\":\"{}\"",padding, sourcehost, snapshot_name, targethost, targetdataset);
 
 		let mut sendc = if sourcehost != "" {Command::new("ssh")} else { Command::new("zfs")};
 			if sourcehost != ""
@@ -547,32 +621,20 @@ async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, prev
 			}
 			sendc.arg("-R");
 			sendc.arg("-s");
-			if !recursive
+
+			// We need to exclude child datasets from *this* replication. 
+			// If recursive is true, we'll replicate the children separately.
+			// If we recusively replicate here, then properties set in the receive 
+			// will **NOT** be applied to children (properties like canmount=off),
+			// and that could be not good.
+			let lines = child_datasets.iter();
+			for line in lines
 			{
-				info!("Replication is not recursive. Checking for child datasets...");
-				// if not recursive, we need to exclude child datasets
-				let stdout = get_child_datasets(sourcedataset);
-				let mut skipped=false;
-				let mut excluded=false;
-				for line in stdout.lines()
-				{
-					if skipped
-					{
-						info!("Excluding child dataset: \"{}\"", line);
-						sendc.arg("-X");
-						sendc.arg(line);
-						excluded = true;
-					}
-					else
-					{
-						skipped=true;
-					}
-				}
-				if !excluded
-				{
-					info!("No child datasets to exclude.");
-				}
+					info!("{}Excluding child dataset: \"{}\"",padding, line);
+					sendc.arg("-X");
+					sendc.arg(line);
 			}
+			
 			if previous_snapshot_name != ""
 			{
 				sendc.arg("-i");
@@ -582,26 +644,26 @@ async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, prev
 		let mut sendo = match sendc.stdout(Stdio::piped())
 			.spawn()
 			{
-				Err(e)=>{error!("Error getting senc stdout:{}",e);return replication_status},
+				Err(e)=>{error!("{}Error getting senc stdout:{}",padding,e);return replication_status},
 				Ok(sendo)=>sendo,
 			};
-		debug!("Created sendc & sendo");
+		debug!("{}Created sendc & sendo",padding);
 
 		let recv_stdin_a = match sendo.stdout.take()
 								{
-									None=>{error!("Failed to take sendo.stdout");return replication_status;},
+									None=>{error!("{}Failed to take sendo.stdout",padding);return replication_status;},
 									Some(o)=>o,
 								};
 		let recv_stdin: Stdio = match recv_stdin_a.try_into()
 									{
-										Err(_e)=>{error!("Failed to try_into sendo.stdout");return replication_status;},
+										Err(_e)=>{error!("{}Failed to try_into sendo.stdout",padding);return replication_status;},
 										Ok(o)=>o,
 									};
-		debug!("Created recv_stdin");
+		debug!("{}Created recv_stdin",padding);
 		let mut recvc = if targethost != "" { Command::new("ssh")}else{Command::new("zfs")};
 			if targethost != ""
 			{
-				info!("push to {}", targethost);
+				info!("{}push to {}",padding, targethost);
 				recvc.arg(targethost);
 				recvc.arg("zfs");
 			}
@@ -621,28 +683,28 @@ async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, prev
 		let mut recvo = match recvc.stdout(Stdio::piped())
 			.spawn()
 			{
-				Err(e)=>{error!("Error creating recvo. Replication may have occured: {}",e);return replication_status},
+				Err(e)=>{error!("{}Error creating recvo. Replication may have occured: {}",padding,e);return replication_status},
 				Ok(recvo)=>recvo,
 			};
-		debug!("Created recvc & recvo");
+		debug!("{}Created recvc & recvo", padding);
 		let stdout = match recvo.stdout.take()
 								{
-									None=>{error!("Failed to take recvo.stdout. Replication may have occured.");return replication_status;},
+									None=>{error!("{}Failed to take recvo.stdout. Replication may have occured.",padding);return replication_status;},
 									Some(o)=>o,
 								};
-		debug!("got stdout from recvo");
+		debug!("{}got stdout from recvo",padding);
 		let (send_output, recv_output) = (sendo.wait_with_output().await, recvo.wait_with_output().await);
-		debug!("waited output and have results.");
+		debug!("{}waited output and have results.",padding);
 		let so = match send_output
 						{
-							Err(e) => {error!("Failed to get send_output. Replication may have occured:{}",e);return replication_status},
+							Err(e) => {error!("{}Failed to get send_output. Replication may have occured:{}",padding,e);return replication_status},
 							Ok(so)=>so,
 						};
 		if so.status.success()
 		{
 			let ro = match recv_output
 						{
-							Err(e) => {error!("Failed to get recv_output. Send was successful, but receive is unknown. Replication may have occured:{}",e);return replication_status},
+							Err(e) => {error!("{}Failed to get recv_output. Send was successful, but receive is unknown. Replication may have occured:{}",padding,e);return replication_status},
 							Ok(ro)=>ro,
 						};
 			if ro.status.success()
@@ -650,26 +712,26 @@ async fn replicate(sourcehost:&str, sourcedataset:&str, snapshot_name:&str, prev
 				replication_status=true;
 
 				let mut reader = BufReader::new(stdout).lines();
-				while let Some(line) = match reader.next_line().await {Ok(l)=>l,Err(e)=>{error!("Replication succeeded, but there was an error reading the results:{}",e);return replication_status} }
+				while let Some(line) = match reader.next_line().await {Ok(l)=>l,Err(e)=>{error!("{}Replication succeeded, but there was an error reading the results:{}",padding,e);return replication_status} }
 				{
-					info!("ZFS RECV: {}", line);
+					info!("{}ZFS RECV: {}",padding, line);
 				}
 			}
 			else
 			{
-				error!("ZFS Receive failed.");
+				error!("{}ZFS Receive failed.",padding);
 			}
 		}
 		else
 		{
-			error!("ZFS Send failed:");
+			error!("{}ZFS Send failed:",padding);
 			for x in &so.stderr 
 			{
-				error!("{x}");
+				error!("{}{}",padding,x);
 			}
 		}
 	}
-	debug!("REPLICATION Done");
+	debug!("{}REPLICATION Done",padding);
 	return replication_status
 }
 

@@ -19,3 +19,4 @@ log = { version = "0.4", features = ["std", "serde"] }
 stderrlog = "0.6.0"
 chrono = "0.4.38"
 printwrap = { path = "../printwrap" }
+async-recursion = "1.1.1"
