@@ -75,12 +75,13 @@ fn usage()
 	printwrap::print_wrap(5,0,"");
 	printwrap::print_wrap(5,0,"For all actions on remote hosts, the only transport supported is ssh. Keys must have already been created on the local system for the user piper will run as, and copied to the target hosts or the ssh connections will fail and no replication will take place. Remote ssh connections will only be as the same user piper is running as locally. Ssh is used for \"zfs receive\" as well as \"zfs list\" for querying the status of target datasets and past replciation.");
 	printwrap::print_wrap(5,0,"");
-	printwrap::print_wrap(5,0,"Piper makes some assumptions and has some defaults:");
-	printwrap::print_wrap(5,8,"  - Replication will always include the \"-R\" and \"-s\" zfs send options. The -s option will skip child datasets IF the child does not have the same most recent snapshot name. E.g. if the replicated dataset has a snapshot @DAY___2025-05-19 but the child's most recent snapshot is @DAY___2025-05-11 then the child will be skipped. Errors will be logged, but the replication of the parent will still take place.");
+	printwrap::print_wrap(5,0,"Some assumptions, defaults, and considerations when using piper:");
+	printwrap::print_wrap(5,8,"  - Though the configuration file and this documentation refers to datasets, piper will replicate zvols as well if you specify them directly in the sourcedataset/targetdataset configuration fields, or if they exist as children included in a recursive replication.");
+	printwrap::print_wrap(5,8,"  - Replication will always include the \"-R\" and \"-s\" zfs send options. This will include all properties of the dataset. Acutal recursive replication will be handled separately within piper.");
 	printwrap::print_wrap(5,8,"  - If the source dataset is encrypted, the \"-w\" (raw) option will be used.");
 	printwrap::print_wrap(5,8,"  - canmount will be set to off (\"-o canmount=none\") on zfs recv for all replications.");
 	printwrap::print_wrap(5,8,"  - The zfs receive will include \"-F\" (force rollback/purge).");
-	printwrap::print_wrap(5,8,"  - Piper does not create snapshots, but at least one snapshot must exist in order to replicate a dataset. At least a second must exist in the source dataset and the first in both the source and destination datasets to perform an incremental replication. Piper will inspect the source and destination datasets to determine which snapshots to be used by using zfs list and sorting by the createtxg property. The source dataset must be local, but the destination dataset may be on a remote host indicated by prepending the \"<hostname>:\" to the target dataset name in the configuration.");
+	printwrap::print_wrap(5,8,"  - Piper does not create snapshots, but at least one snapshot must exist in order to replicate a dataset. At least a second must exist in the source dataset and the first in both the source and destination datasets to perform an incremental replication. Piper will inspect the source and destination datasets to determine which snapshots to be used by using zfs list and sorting by the createtxg property. Either or both the sourcedataset and targetdataset can be remote. This is indicated by prepending the \"<hostname>:\" to the sourcedataset or targetdataset in the configuration.");
 	printwrap::print_wrap(5,8,"  - Piper does not care where these snapshots came from, but if the last snapshot used for replication is destroyed, further replication attempts will fail as incremential replication is always between a current snapshot the previous snapshot used. If that snapshot doesn't exist, it can't be used as a base for further replication.");
 	printwrap::print_wrap(5,8,"  - Piper does not destroy snapshots on the source, either, but the \"-F\" option on zfs receive does have the side effect/benefit of purging snapshots on the destination that no-longer exist on the source.");
 	printwrap::print_wrap(5,8,"  - Piper by default will replicate the first snapshot found for a given dataset. Sometimes this may not be desired. If one makes snapshots every 5 minutes *and* every hour, but purge the 5-minute snapshots after 2 hours, an initial replication at midnight may replicate the most recent 5-minute snapshot. However, an incremental replication the following night will attempt to perform an incremental between the current most recent 5-minute snapshot and the 5-minute snapshot from the previous night ... which would have been purged. This replication will fail. To avoid this, an optional field labeled \"prefix\" can be included in the configuration file. Piper will *only* replicate snapshots with this string at the beginning of the snapshot tag. For example, a configuration file with the line:");
@@ -145,7 +146,7 @@ fn can_login_to_host(host:&str) -> bool
 fn is_dataset_encrypted(padding:&str,host: &str, dataset:&str) -> bool
 {
 	debug!("{}is dataset encrypted {}",padding , dataset);
-	let full_command = format!("zfs list -H -t filesystem -o encryption  {}",dataset);
+	let full_command = format!("zfs list -H -t filesystem,volume -o encryption  {}",dataset);
 	debug!("{}{}", padding, full_command);
 	//let fs_list = match std::process::Command::new("zfs")
 	let mut fs_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
@@ -157,7 +158,7 @@ fn is_dataset_encrypted(padding:&str,host: &str, dataset:&str) -> bool
 			fs_list.arg("list");
 			fs_list.arg("-H");
 			fs_list.arg("-t");
-			fs_list.arg("filesystem");
+			fs_list.arg("filesystem,volume");
 			fs_list.arg("-o");
 			fs_list.arg("encryption");
 			fs_list.arg(dataset);
@@ -188,7 +189,7 @@ fn get_child_datasets(padding: &str, host: &str, dataset:&str) -> Vec<String>
 {
 	let mut vector:Vec<String> = Vec::new();
 	info!("{}Get child datasets \"{}\"", padding, dataset);
-	debug!("{}zfs list -H -d 1 -t filesystem -o name -s createtxg {}", padding,dataset);
+	debug!("{}zfs list -H -d 1 -t filesystem,volume -o name -s createtxg {}", padding,dataset);
 	let mut snapshot_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
 			{
@@ -200,7 +201,7 @@ fn get_child_datasets(padding: &str, host: &str, dataset:&str) -> Vec<String>
 			snapshot_list.arg("-d");
 			snapshot_list.arg("1");
 			snapshot_list.arg("-t");
-			snapshot_list.arg("filesystem");
+			snapshot_list.arg("filesystem,volume");
 			snapshot_list.arg("-o");
 			snapshot_list.arg("name");
 			snapshot_list.arg("-s");
@@ -253,7 +254,7 @@ fn does_dataset_exist_on_target(padding:&str, sourcedataset:&str, targetdataset:
 	let datasetname = rsplit_once(sourcedataset, '/');
 	let targetdatasetname = format!("{}/{}", targetdataset,datasetname);
 	let ssh = if host=="" {String::from("")}else{format!("ssh {} ", host)};
-	debug!("{}{}zfs list -H -t filesystem -o name -S createtxg {}", padding,ssh,targetdatasetname);
+	debug!("{}{}zfs list -H -t filesystem,volume -o name -S createtxg {}", padding,ssh,targetdatasetname);
 	let mut dataset_list = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
 			if host != ""
 			{
@@ -263,7 +264,7 @@ fn does_dataset_exist_on_target(padding:&str, sourcedataset:&str, targetdataset:
 			dataset_list.arg("list");
 			dataset_list.arg("-H");
 			dataset_list.arg("-t");
-			dataset_list.arg("filesystem");
+			dataset_list.arg("filesystem,volume");
 			dataset_list.arg("-o");
 			dataset_list.arg("name");
 			dataset_list.arg("-S");
