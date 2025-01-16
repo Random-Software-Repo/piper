@@ -47,21 +47,30 @@ All piper logging is to stdout.
 
 ### Prerequisites:
 
--  Rust 1.63 or newer
--  Both the piper and printwrap repos from random-software-repo:
-```
-git clone https://www.github.com/Random-Software-Repo/piper
-git clone https://www.github.com/Random-Software-Repo/printwrap
-````
--  Gnu Make (make on most if not all linux distrobutions, gmake on FreeBSD)
-     
+-  You must have a rust toolchain installed prior to building weathr. You can install rust from:
+
+> https://www.rust-lang.org/learn/get-started
+
+-  Gnu Make (`make` on most if not all linux distributions, `gmake` on FreeBSD)
+
 ### To compile:
 
-  Run `make build` or `cargo build --release`
+```
+$ mkdir piper-src
+$ cd piper-src
+$ git clone https://www.github.com/Random-Software-Repo/printwrap
+$ git clone https://www.github.com/Random-Software-Repo/piper
+$ cd piper
+$ make build
+````
 
 ### To install:
 
-  Run `sudo make install` or `sudo make install dir=/an/alternate/path/for/piper`
+From the cloned piper repository:
+
+```
+$ sudo make install
+````
 
 ### To generate a config file:
 
