@@ -504,6 +504,48 @@ async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedata
 
 }
 
+fn snapshot_hold(padding: &str, host:&str,snapshot:&str, action:&str)->bool
+{
+	info!("{}{} snapshot \"{}\" on host \"{}\"",padding, action, snapshot, host);
+	let full_command = format!("zfs hold piper {}",snapshot);
+	debug!("{}{}", padding, full_command);
+
+	let mut hold = if host=="" {std::process::Command::new("zfs")}else{std::process::Command::new("ssh")};
+			if host != ""
+			{
+				hold.arg(host);
+				hold.arg("zfs");
+			}
+			hold.arg(action);
+			hold.arg("piper");
+			hold.arg(snapshot);
+	let hold_out= match hold.stdout(Stdio::piped())
+			.output()
+			{
+				Err(e)=> {error!("{}Error on {}:{}", padding, action, e);return false},
+				Ok(hold_out)=>hold_out,
+			};
+	let hold_err= match hold.stderr(Stdio::piped())
+			.output()
+			{
+				Err(e)=>{error!("{} .... {}",padding,e);return false},
+				Ok(hold_out)=>hold_out
+			};
+	let stderr = match String::from_utf8(hold_err.stderr)
+			{
+				Err(e)=>{error!("{}Error converting hold_err to utf8:{}",padding,e);return false},
+				Ok(stderr)=>stderr
+			};
+
+	let success:bool = hold_out.status.success();
+	debug!("{} .... {} {}",padding,action, if success {"Succeeded!"}else{"Failed!"});
+	if !success
+	{
+		error!("{}{}",padding, stderr);
+	}
+	return success;
+}
+
 async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)-> Vec<String>
 {
 	//let spadding = format!("    {}",opadding);
@@ -535,7 +577,6 @@ async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targ
 			else
 			{
 				error!("{}Incremental Replication failed.", padding);
-				//completed=false;
 			}
 		}
 		else
@@ -739,6 +780,16 @@ async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_
 		}
 	}
 	debug!("{}REPLICATION Done",padding);
+	snapshot_hold(padding, sourcehost,snapshot_name, "hold");
+	let remote_target_snapshot=format!("{}/{}",targetdataset,rsplit_once(snapshot_name,'/'));
+	snapshot_hold(padding, targethost, remote_target_snapshot.as_str(),"hold");
+
+	if previous_snapshot_name != ""
+	{
+		snapshot_hold(padding, sourcehost, previous_snapshot_name,"release");
+		let remote_previous_target_snapshot=format!("{}/{}",targetdataset,rsplit_once(previous_snapshot_name,'/'));
+		snapshot_hold(padding, targethost, remote_previous_target_snapshot.as_str(),"release");
+	}
 	return replication_status
 }
 
