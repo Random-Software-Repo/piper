@@ -12,7 +12,8 @@ struct Job
 {
 	sourcedataset: String,
 	prefix: Option<String>,
-	recursive: bool,
+	recursive: Option<bool>,
+	canmount: Option<bool>,
 	targetdataset: String,
 }
 #[derive(Serialize, Deserialize)]
@@ -48,7 +49,16 @@ fn walk_json(piper: &Piper)
 			None=>println!("\t\tPrefix: NO-PREFIX"),
 			Some(s)=>println!("\t\tPrefix: \"{}\"",s),
 		};
-		println!("\tRecursive:\"{}\"", j.recursive);
+		match &j.recursive
+		{
+			None=> println!("\tRecursive:\"FALSE (default)\""),
+			Some(s)=> println!("\tRecursive:\"{}\"", *s),
+		}
+		match &j.canmount
+		{
+			None=> println!("\tCanmount:\"OFF (default)\""),
+			Some(s)=> println!("\tRecursive:\"{}\"", if *s {"ON"}else{"OFF"}),
+		}
 		println!("\tTarget Dataset:\"{}\"", j.targetdataset);
 	}
 }
@@ -79,7 +89,7 @@ fn usage()
 	printwrap::print_wrap(5,8,"  - Though the configuration file and this documentation refers to datasets, piper will replicate zvols as well if you specify them directly in the sourcedataset/targetdataset configuration fields, or if they exist as children included in a recursive replication.");
 	printwrap::print_wrap(5,8,"  - Replication will always include the \"-R\" and \"-s\" zfs send options. This will include all properties of the dataset. Acutal recursive replication will be handled separately within piper.");
 	printwrap::print_wrap(5,8,"  - If the source dataset is encrypted, the \"-w\" (raw) option will be used.");
-	printwrap::print_wrap(5,8,"  - canmount will be set to off (\"-o canmount=none\") on zfs recv for all replications.");
+	printwrap::print_wrap(5,8,"  - By default, canmount will be set to off (\"-o canmount=off\") on zfs recv for all replications. This can be overridden by adding '\"canmount\":true,' to the job in the config file. This will set \"-o canmount=on\". Piper does not provide an option to set \"canmount=noauto\".");
 	printwrap::print_wrap(5,8,"  - The zfs receive will include \"-F\" (force rollback/purge).");
 	printwrap::print_wrap(5,8,"  - Piper does not create snapshots, but at least one snapshot must exist in order to replicate a dataset. At least a second must exist in the source dataset and the first in both the source and destination datasets to perform an incremental replication. Piper will inspect the source and destination datasets to determine which snapshots to be used by using zfs list and sorting by the createtxg property. Either or both the sourcedataset and targetdataset can be remote. This is indicated by prepending the \"<hostname>:\" to the sourcedataset or targetdataset in the configuration.");
 	printwrap::print_wrap(5,8,"  - Piper does not care where these snapshots came from, but if the last snapshot used for replication is destroyed, further replication attempts will fail as incremential replication is always between a current snapshot the previous snapshot used. If that snapshot doesn't exist, it can't be used as a base for further replication.");
@@ -435,7 +445,16 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool)
 {
 	let (sourcehost,sourcedataset)=split_host_and_dataset(&j.sourcedataset);
 	let (targethost,targetdataset)=split_host_and_dataset(&j.targetdataset);
-	let recursive=j.recursive;
+	let recursive:bool= match &j.recursive
+		{
+			None=>false,
+			Some(s)=>*s,
+		};
+	let canmount:bool= match &j.canmount
+		{
+			None=>false,
+			Some(s)=>*s,
+		};
 	let prefix = match &j.prefix
 		{
 			None=>"",
@@ -463,7 +482,7 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool)
 		}
 	}
 
-	process_dataset_intermediate("", sourcehost, sourcedataset, targethost,targetdataset, recursive, prefix, send_no_op, recv_no_op).await;
+	process_dataset_intermediate("", sourcehost, sourcedataset, targethost,targetdataset, canmount, recursive, prefix, send_no_op, recv_no_op).await;
 }
 
 /*
@@ -473,9 +492,9 @@ async fn process_job(j:&Job, send_no_op:bool, recv_no_op:bool)
 	it also make the recursion a little easier to keep clear in a hypothetical programmer's head.
 */
 #[async_recursion]
-async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)
+async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, canmount:bool, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)
 {
-	let children= process_dataset(opadding, sourcehost, sourcedataset, targethost,targetdataset, recursive, prefix, send_no_op, recv_no_op).await;
+	let children= process_dataset(opadding, sourcehost, sourcedataset, targethost,targetdataset, canmount, recursive, prefix, send_no_op, recv_no_op).await;
 	if recursive
 	{
 		info!("{}Recursive = True.  Examining child datasets...",opadding);
@@ -490,7 +509,7 @@ async fn process_dataset_intermediate(opadding: &str, sourcehost:&str,sourcedata
 			// targetdataset needs to be targetdataset/sourcedataset_name
 			let child_dataset_name = rsplit_once(sourcedataset, '/');
 			let child_target_dataset=format!("{}/{}",targetdataset,child_dataset_name);
-			process_dataset_intermediate(npadding.as_str(), sourcehost, child_data_set, targethost,child_target_dataset.as_str(), recursive, prefix, send_no_op, recv_no_op ).await;
+			process_dataset_intermediate(npadding.as_str(), sourcehost, child_data_set, targethost,child_target_dataset.as_str(), canmount, recursive, prefix, send_no_op, recv_no_op ).await;
 		}
 		if count == 0
 		{
@@ -546,7 +565,7 @@ fn snapshot_hold(padding: &str, host:&str,snapshot:&str, action:&str)->bool
 	return success;
 }
 
-async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)-> Vec<String>
+async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targethost:&str,targetdataset:&str, canmount:bool, recursive:bool, prefix:&str, send_no_op:bool, recv_no_op:bool)-> Vec<String>
 {
 	//let spadding = format!("    {}",opadding);
 	//let padding = spadding.as_str();
@@ -570,7 +589,7 @@ async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targ
 			let current_snapshot_name_full = format!("{}@{}", sourcedataset, current_snapshot_name);
 			let previous_snapshot_name_full = format!("{}@{}", sourcedataset, previous_snapshot_name);
 
-			if replicate(padding, sourcehost, sourcedataset,current_snapshot_name_full.as_str(), previous_snapshot_name_full.as_str(), encrypted, recursive, &child_datasets, targethost, targetdataset, send_no_op, recv_no_op).await
+			if replicate(padding, sourcehost, sourcedataset,current_snapshot_name_full.as_str(), previous_snapshot_name_full.as_str(), encrypted, canmount, recursive, &child_datasets, targethost, targetdataset, send_no_op, recv_no_op).await
 			{
 				info!("{}Incremental Replication succeeded.", padding);
 			}
@@ -611,7 +630,7 @@ async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targ
 			info!("{}Last snapshot made: \"{}\"", padding, current_snapshot_name);
 
 			let current_snapshot_name_full = format!("{}@{}", sourcedataset, current_snapshot_name);
-			if replicate(padding, sourcehost, sourcedataset,current_snapshot_name_full.as_str(), "", encrypted, recursive, &child_datasets, targethost, targetdataset, send_no_op, recv_no_op).await
+			if replicate(padding, sourcehost, sourcedataset,current_snapshot_name_full.as_str(), "", encrypted, canmount, recursive, &child_datasets, targethost, targetdataset, send_no_op, recv_no_op).await
 			{
 				info!("{}Full Replication succeeded.", padding);
 			}
@@ -626,7 +645,7 @@ async fn process_dataset(padding: &str, sourcehost:&str,sourcedataset:&str, targ
 }
 
 async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_name:&str, previous_snapshot_name:&str, 
-					encrypted:bool, recursive:bool, child_datasets:&Vec<String>, targethost:&str, targetdataset:&str, 
+					encrypted:bool, canmount:bool, recursive:bool, child_datasets:&Vec<String>, targethost:&str, targetdataset:&str, 
 					send_no_op:bool, recv_no_op:bool) -> bool
 {
 	let mut replication_status = false;
@@ -635,6 +654,7 @@ async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_
 	info!("{}snapshot_name         : \"{}\"",padding, snapshot_name);
 	info!("{}previous_snapshot_name: \"{}\"",padding, previous_snapshot_name);
 	info!("{}encrypted             : \"{}\"",padding, encrypted);
+	info!("{}canmount              : \"{}\"",padding, canmount);
 	info!("{}recursive             : \"{}\"",padding, recursive);
 	info!("{}targethost            : \"{}\"",padding, targethost);
 	info!("{}targetdataset         : \"{}\"",padding, targetdataset);
@@ -722,8 +742,17 @@ async fn replicate(padding:&str, sourcehost:&str, _sourcedataset:&str, snapshot_
 			}
 			recvc.arg("-v");
 			recvc.arg("-e");
+
 			recvc.arg("-o");
-			recvc.arg("canmount=off");
+			if canmount
+			{
+				recvc.arg("canmount=on");
+			}
+			else
+			{
+				recvc.arg("canmount=off");
+			}
+
 			recvc.arg("-F");
 			recvc.arg("-u");
 			recvc.arg(targetdataset);
