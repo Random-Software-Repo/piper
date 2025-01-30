@@ -31,8 +31,8 @@ as "zfs list" for querying the status of target datasets and past replciation.
  - Piper handles encrypted datasets in ***one*** of three ways:
 
     * If the source dataset is encrypted, the "-w" (raw) option will be used and the destination will retain the original encryption type and key settings.
-    * If the source is unencrypted ***and*** the containing destination dataset is encrypted ***and*** the option "inherit_encryption":true is added to the job in the configuration file, the replicated dataset will inherit the encryption options of the containing dataset on the destination. If the containing dataset is encrypted, the replicated dataset will be as well.
-    * All other conditions will result in an unencypted dataset on the target system.
+    * Unencrypted source datasets will inherit the encryption options of the containing dataset on the target, and thus become encrypted if the target is encrypted unless...
+    * If the optional configuration setting "inherit_encryption":false is set, encryption settings will not be inherited (as by default they would have), and the replicated dataset will remain unencrypted as it was on the source.
 
  - By default, canmount will be set to off ("-o canmount=off") on zfs recv for all replications. This can be overridden by adding '\"canmount\":true,' to the job in the config file. This will set \"-o canmount=on\". Piper does not provide an option to set \"canmount=noauto\"."
  - The zfs receive will include "-F" (force rollback/purge).
